@@ -3,8 +3,10 @@
 package linuxutil
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"syscall"
 	"unsafe"
 )
@@ -235,3 +237,165 @@ func Unmount(target string, detach bool) error {
 
 // MntDetach is lazy unmount; exported by the syscall package as MNT_DETACH.
 const MntDetach = 0x2
+
+// RemountReadOnly makes an existing mount tree read-only.
+//
+// MS_RDONLY is ignored by the initial mount(2) call, so it has to be applied in
+// a second call with MS_REMOUNT. MS_REC is required to cover submounts: a
+// read-only / that still has a writable /proc underneath it is not read-only.
+func RemountReadOnly(path string) error {
+	if err := syscall.Mount("", path, "",
+		syscall.MS_BIND|syscall.MS_REMOUNT|syscall.MS_RDONLY|syscall.MS_REC, ""); err != nil {
+		return fmt.Errorf("remount %s read-only: %w", path, err)
+	}
+	return nil
+}
+
+// MountFilesystem mounts an arbitrary filesystem type at target.
+func MountFilesystem(fstype, target, options string, readonly bool) error {
+	flags := uintptr(msNoSymFollow)
+	if readonly {
+		flags |= syscall.MS_RDONLY
+	}
+	if err := syscall.Mount(fstype, target, fstype, flags, options); err != nil {
+		return fmt.Errorf("mount %s on %s (%s): %w", fstype, target, options, err)
+	}
+	return nil
+}
+
+// MountOverlay assembles an overlayfs from an ordered lowerdir list.
+//
+// OverlayFS is what makes layered images cheap: the read-only layers stay
+// untouched and only a thin upper layer is written to. Copying every layer into
+// a single tree instead would cost gigabytes and, worse, would lose the
+// ability to tell which bytes came from where.
+//
+// The option string must contain lowerdir (colon-separated, highest priority
+// first), upperdir and workdir. All three must live on the same filesystem,
+// which is why runtimes put them in one directory.
+func MountOverlay(target, options string, readonly bool) error {
+	if !hasOpt(options, "lowerdir=") || !hasOpt(options, "upperdir=") || !hasOpt(options, "workdir=") {
+		return fmt.Errorf("overlay mount on %s needs lowerdir, upperdir and workdir", target)
+	}
+	if err := syscall.Mount("overlay", target, "overlay",
+		uintptr(msNoSymFollow), options); err != nil {
+		return fmt.Errorf("mount overlay on %s: %w", target, err)
+	}
+	if readonly {
+		return RemountReadOnly(target)
+	}
+	return nil
+}
+
+func hasOpt(options, key string) bool {
+	for _, o := range strings.Split(options, ",") {
+		if strings.HasPrefix(o, key) {
+			return true
+		}
+	}
+	return false
+}
+
+// ---------------------------------------------------------------------------
+// utsname(2)
+// ---------------------------------------------------------------------------
+
+// sysSethostnameNr is the `sethostname(2)` syscall number on x86_64.
+// Go does not wrap sethostname at all.
+const sysSethostnameNr = 172
+
+// Sethostname sets the hostname of the current UTS namespace.
+//
+// The hostname is per-namespace, so this only affects the container when called
+// inside a new UTS namespace. Called outside one it would rename the host,
+// which is why the plan orders it strictly after the clone.
+//
+// The kernel stores the name in a fixed-size field (64 bytes) that is *not
+// NUL-terminated, so the length is passed explicitly rather than derived.
+func Sethostname(name string) error {
+	b := []byte(name)
+	if len(b) == 0 {
+		return errors.New("sethostname: empty name")
+	}
+	if len(b) > 64 {
+		return fmt.Errorf("sethostname: %d bytes exceeds the kernel's 64-byte limit", len(b))
+	}
+	_, _, errno := syscall.RawSyscall(sysSethostnameNr,
+		uintptr(unsafe.Pointer(&b[0])), uintptr(len(b)), 0)
+	if errno != 0 {
+		return fmt.Errorf("sethostname(%q): %w", name, errno)
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// capabilities(7)
+// ---------------------------------------------------------------------------
+
+// setBoundingCapability drops a capability from the bounding set.
+//
+// The bounding set is inherited across execve and cannot be regained, so
+// removing a capability here is permanent for the container. This is the
+// mechanism behind `--cap-drop ALL`, and it is far stronger than merely
+// clearing the effective set: an empty effective set can be repopulated by any
+// code that manages to exec a file with the file capability set.
+func SetBoundingCapabilities(drop []string) error {
+	for _, c := range drop {
+		bit, ok := capabilityBit(c)
+		if !ok {
+			return fmt.Errorf("unknown capability %q", c)
+		}
+		if err := prctl(prCapbsetDrop, uintptr(bit), 0, 0, 0); err != nil {
+			return fmt.Errorf("drop capability %s: %w", c, err)
+		}
+		if err := ambientClear(bit); err != nil {
+			return fmt.Errorf("clear ambient capability %s: %w", c, err)
+		}
+	}
+	return nil
+}
+
+// PR_CAPBSET_DROP from include/linux/prctl.h.
+const prCapbsetDrop = 24
+
+// capBits maps a capability name to its bit index in the capability bitmasks,
+// from include/uapi/linux/capability.h. The ordering is the kernel's own and is
+// load-bearing: the index is what goes into the bitmask.
+var capBits = map[string]uint{
+	"CAP_CHOWN": 0, "CAP_DAC_OVERRIDE": 1, "CAP_DAC_READ_SEARCH": 2,
+	"CAP_FOWNER": 3, "CAP_FSETID": 4, "CAP_KILL": 5, "CAP_SETGID": 6,
+	"CAP_SETUID": 7, "CAP_SETPCAP": 8, "CAP_LINUX_IMMUTABLE": 9,
+	"CAP_NET_BIND_SERVICE": 10, "CAP_NET_BROADCAST": 11,
+	"CAP_NET_ADMIN": 12, "CAP_NET_RAW": 13, "CAP_IPC_LOCK": 14,
+	"CAP_IPC_OWNER": 15, "CAP_SYS_MODULE": 16, "CAP_SYS_RAWIO": 17,
+	"CAP_SYS_CHROOT": 18, "CAP_SYS_PTRACE": 19, "CAP_SYS_PACCT": 20,
+	"CAP_SYS_ADMIN": 21, "CAP_SYS_BOOT": 22, "CAP_SYS_NICE": 23,
+	"CAP_SYS_RESOURCE": 24, "CAP_SYS_TIME": 25, "CAP_SYS_TTY_CONFIG": 26,
+	"CAP_MKNOD": 27, "CAP_LEASE": 28, "CAP_AUDIT_WRITE": 29,
+	"CAP_AUDIT_CONTROL": 30, "CAP_SETFCAP": 31, "CAP_MAC_OVERRIDE": 32,
+	"CAP_MAC_ADMIN": 33, "CAP_SYSLOG": 34, "CAP_WAKE_ALARM": 35,
+	"CAP_BLOCK_SUSPEND": 36, "CAP_AUDIT_READ": 37, "CAP_PERFMON": 38,
+	"CAP_BPF": 39, "CAP_CHECKPOINT_RESTORE": 40,
+}
+
+// capabilityBit resolves a capability name, or a bare bit index, to its bit.
+func capabilityBit(name string) (uint, bool) {
+	if n, ok := capBits[strings.ToUpper(name)]; ok {
+		return n, true
+	}
+	var n uint
+	if _, err := fmt.Sscanf(name, "%d", &n); err == nil && n <= 40 {
+		return n, true
+	}
+	return 0, false
+}
+
+// prctlAmbientClear is PR_CAP_AMBIENT_CLEAR.
+const prCapAmbientClear = 47
+
+func ambientClear(bit uint) error {
+	if err := prctl(prCapAmbientClear, uintptr(1<<bit), 0, 0, 0); err != nil {
+		return fmt.Errorf("prctl(PR_CAP_AMBIENT_CLEAR): %w", err)
+	}
+	return nil
+}

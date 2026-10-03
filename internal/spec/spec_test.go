@@ -162,8 +162,7 @@ func TestPlanOrdering(t *testing.T) {
 		if idx[OpNoNewPrivs] > idx[OpSetUID] {
 			t.Error("PR_SET_NO_NEW_PRIVS must precede setresuid")
 		}
-	}
-	// execve is the last setup step; teardown only happens after it returns.
+	} // execve is the last setup step; teardown only happens after it returns.
 	if idx[OpExec] > idx[OpWaitReap] {
 		t.Error("exec must precede the reaping wait")
 	}
@@ -218,35 +217,23 @@ func TestPrivilegeDropOrder(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	sg := -1
 	var gidIdx, uidIdx = -1, -1
 	for i, o := range p.Ops {
 		switch o.Kind {
+		case OpSetGID:
+			gidIdx = i
 		case OpSetUID:
-			if o.Num == 1000 && uidIdx < 0 {
-				uidIdx = i
-			}
-			if o.Num == 1000 && o.Value == "1000" {
-				gidIdx = i // the first (gid) call
-			}
+			uidIdx = i
 		case OpSetGroups:
-			if gidIdx < 0 {
-				gidIdx = -2 // marker
-			}
-		}
-	}
-
-	// setgroups must come first, then setresgid, then setresuid.
-	sg := -1
-	for i, o := range p.Ops {
-		if o.Kind == OpSetGroups {
 			sg = i
 		}
 	}
 	if sg < 0 {
 		t.Fatal("setgroups op missing for a non-root uid")
 	}
-	if sg > uidIdx {
-		t.Error("setgroups must precede setresuid (otherwise the gid drop is irreversible)")
+	if !(sg < gidIdx && gidIdx < uidIdx) {
+		t.Errorf("privilege drop order wrong: setgroups=%d setresgid=%d setresuid=%d", sg, gidIdx, uidIdx)
 	}
 	if len(p.Ops[sg].Values) != 2 || p.Ops[sg].Values[0] != "1001" {
 		t.Errorf("additional gids not carried into the plan: %v", p.Ops[sg].Values)

@@ -53,8 +53,17 @@ const (
 // CLONE_NEWNS/NEWPID/NEWNET/NEWUTS/NEWIPC ARE exported by the syscall package
 // and are re-used from there; CLONE_NEWCGROUP is not exported by Go at all.
 const (
-	cloneNewCgroup = 0x02000000
+	// CloneNewCgroup is CLONE_NEWCGROUP (0x02000000). Go's syscall package does
+	// not export this constant on any architecture.
+	CloneNewCgroup = 0x02000000
 	cloneNewUser   = 0x10000000
+)
+
+// rlimit resources from include/uapi-generic/resource.h.
+const (
+	RLimitCore   = 4
+	RLimitNProc  = 6
+	RLimitNoFile = 7
 )
 
 // Namespace inode numbers as reported in /proc/<pid>/ns/*.

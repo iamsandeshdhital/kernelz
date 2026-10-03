@@ -20,7 +20,8 @@ const (
 	OpCgroupAttach  OpKind = "cgroup_attach"  // move a pid into a cgroup
 	OpNetnsSetup    OpKind = "netns_setup"    // veth + bridge + addresses
 	OpNetnsTeardown OpKind = "netns_teardown" // remove veth/bridge
-	OpSetUID        OpKind = "setuid"         // setresuid/setresgid
+	OpSetGID        OpKind = "setgid"         // setresgid(2)
+	OpSetUID        OpKind = "setuid"         // setresuid(2)
 	OpSetGroups     OpKind = "setgroups"      // setgroups(2)
 	OpNoNewPrivs    OpKind = "no_new_privs"   // prctl(PR_SET_NO_NEW_PRIVS)
 	OpSetrlimit     OpKind = "setrlimit"      // RLIMIT_NOFILE etc.
@@ -56,6 +57,13 @@ type Op struct {
 	Value string `json:"value,omitempty"`
 	// Values carries a list for multi-arg ops (env, caps, flags).
 	Values []string `json:"values,omitempty"`
+	// Env carries the process environment for OpExec.
+	//
+	// It is kept separate from Values rather than appended to it because argv and
+	// environ are both flat []string of NUL-terminated strings: with the two
+	// concatenated there is no way to recover the split. An env value of
+	// "-c" is indistinguishable from the flag of the same name.
+	Env []string `json:"env,omitempty"`
 	// Num carries numeric args (rlimit value, pids limit...).
 	Num int64 `json:"num,omitempty"`
 }
@@ -313,7 +321,7 @@ func (s *Spec) BuildPlan() (*Plan, error) {
 		})
 		// setresgid must precede setresuid: once the uid is dropped there is
 		// no privilege left to change the gid.
-		p.add(Op{Kind: OpSetUID, Value: u32ToString(s.Process.User.GID), Num: int64(s.Process.User.GID),
+		p.add(Op{Kind: OpSetGID, Value: u32ToString(s.Process.User.GID), Num: int64(s.Process.User.GID),
 			Detail: fmt.Sprintf("setresgid(%d)", s.Process.User.GID), FailFatal: true})
 		p.add(Op{Kind: OpSetUID, Value: u32ToString(s.Process.User.UID), Num: int64(s.Process.User.UID),
 			Detail: fmt.Sprintf("setresuid(%d)", s.Process.User.UID), FailFatal: true})
@@ -327,7 +335,8 @@ func (s *Spec) BuildPlan() (*Plan, error) {
 	p.add(Op{
 		Kind:      OpExec,
 		Value:     s.Process.Args[0],
-		Values:    append(append([]string{}, s.Process.Args[1:]...), s.Process.Env...),
+		Values:    s.Process.Args[1:],
+		Env:       s.Process.Env,
 		Detail:    "execve(" + strings.Join(s.Process.Args, " ") + ")",
 		FailFatal: true,
 	})
@@ -338,7 +347,8 @@ func (s *Spec) BuildPlan() (*Plan, error) {
 	}
 	p.add(Op{Kind: OpWaitReap, Detail: "wait4(init_pid) and reap orphans"})
 	if s.hasNS(NSNet) {
-		p.add(Op{Kind: OpNetnsTeardown, Value: s.Bridge})
+		p.add(Op{Kind: OpNetnsTeardown, Value: s.Bridge,
+			Detail: "remove veth pair" + bridgeSuffix(s.Bridge)})
 	}
 
 	return p, nil
@@ -428,6 +438,14 @@ func flagSuffixes(ns []NSType) []string {
 		out = append(out, strings.ToUpper(string(n)))
 	}
 	return out
+}
+
+// bridgeSuffix renders the optional " on bridge X" clause used in op details.
+func bridgeSuffix(bridge string) string {
+	if bridge == "" {
+		return ""
+	}
+	return " on bridge " + bridge
 }
 
 func u32ToString(v uint32) string { return fmt.Sprintf("%d", v) }
