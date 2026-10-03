@@ -175,4 +175,4 @@ primitives explicit, ordered and testable rather than hidden behind a daemon.
 
 ## License
 
-MIT — see [LICENSE](LICENSE). The copyright holder is a placeholder.
+MIT — Copyright (c) 2026 Sandesh Dhital. See [LICENSE](LICENSE).
