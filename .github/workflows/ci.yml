@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: build and test (linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          check-latest: true
+
+      # internal/linuxutil is linux-only and wraps raw syscalls. Building it
+      # for the native runner is what proves the syscall numbers and constants
+      # line up with the real kernel headers.
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test -race -count=1 ./...
+
+      # The two symlink tests in internal/image are skipped on Windows and run
+      # here, so this job is the first place they have ever executed.
+      - name: Race and coverage
+        run: go test -cover ./...
+
+      # Cross-compile for the other architectures a container runtime is
+      # expected to support on a Linux host.
+      - name: Cross-compile (arm64)
+        run: GOOS=linux GOARCH=arm64 go build ./...
+
+  crosscheck:
+    name: build (windows, darwin)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+      # The platform-independent packages must stay portable, so they are built
+      # everywhere. Only internal/linuxutil is linux-gated.
+      - run: go build ./...

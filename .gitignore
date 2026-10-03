@@ -1,0 +1,23 @@
+# Build output
+/bin/
+/dist/
+/kernelz
+/kz-init
+
+# Go
+*.exe
+*.test
+*.out
+coverage.*
+
+# Container runtime state (never commit a rootfs)
+/var/
+*.tar
+*.tar.gz
+
+# Editors / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

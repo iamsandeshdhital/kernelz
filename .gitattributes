@@ -1,0 +1,16 @@
+# Normalise line endings on checkout so the tree is identical on Windows,
+# Linux and macOS. Without this, CRLF checked out on Windows gets committed and
+# shows up as a whole-file diff on a Linux CI runner.
+* text=auto eol=lf
+
+# Shell scripts must stay LF even on Windows, or they fail with bad interpreter.
+*.sh text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+
+# Never mangle binaries.
+*.tar binary
+*.tar.gz binary
+*.gz binary
+*.png binary
+*.jpg binary
